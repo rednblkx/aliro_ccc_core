@@ -24,6 +24,14 @@ else()
     set(DWT_DRIVER_DIR "${decadriver_SOURCE_DIR}/dwt_uwb_driver")
     set(DWT_PLATFORM_DIR "${decadriver_SOURCE_DIR}/platform")
 endif()
+set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+set(USE_SHARED_MBED_LIBRARY OFF CACHE BOOL "" FORCE)
+set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
+FetchContent_Declare(mbedtls
+        URL https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.6/mbedtls-3.6.6.tar.bz2
+        URL_HASH SHA256=8fb65fae8dcae5840f793c0a334860a411f884cc537ea290ce1c52bb64ca007a)
+FetchContent_MakeAvailable(mbedtls)
 
 add_library(dwt_uwb_driver STATIC
     ${DWT_DRIVER_DIR}/deca_interface.c
@@ -73,7 +81,7 @@ target_include_directories(uwb_core
         src
 )
 
-target_link_libraries(uwb_core PUBLIC dwt_uwb_driver)
+target_link_libraries(uwb_core PUBLIC mbedtls mbedcrypto dwt_uwb_driver)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(uwb_core PRIVATE
