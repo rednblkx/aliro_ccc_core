@@ -115,8 +115,6 @@ public:
     void handleDriverRxTimeout();
     void handleDriverRxError(uint32_t errorStatus);
 
-    void processInterrupt();
-
 private:
     hal::ISpiDevice& m_spi;
     hal::IGpioPin& m_irqPin;

@@ -59,7 +59,11 @@ core::Result<MacHeader> FrameCodec::decodeHeader(std::span<const std::byte> fram
     MacHeader header{};
     header.destinationShortAddress = readLe16(&data[2]);
     header.frameCounter = core::FrameCounter{readLe32(&data[5])};
-    std::memcpy(header.keySource.data(), &data[9], 4);
+    // Wire is the LE image of KeySourceHigh||KeySourceLow (see encodeHeader); store
+    // the canonical {High, Low} order so it compares directly against deriveAddresses.
+    for (size_t i = 0; i < 4; ++i) {
+        header.keySource[i] = data[12 - i];
+    }
     header.messageId = static_cast<MessageIdentifier>(data[19]);
     header.payloadLength = static_cast<uint8_t>(data[20]);
 
@@ -77,12 +81,14 @@ core::Result<size_t> FrameCodec::encodeHeader(const MacHeader& header, std::span
     writeLe16(header.destinationShortAddress, &p[2]);
     p[4] = static_cast<std::byte>(SecurityControlField);
     writeLe32(header.frameCounter.get(), &p[5]);
-    std::memcpy(&p[9], header.keySource.data(), 4);
+    for (size_t i = 0; i < 4; ++i) {
+        p[9 + i] = header.keySource[3 - i];
+    }
     p[13] = static_cast<std::byte>(KeyIndexField);
     writeLe16(VendorIeHeader, &p[14]);
-    p[16] = static_cast<std::byte>(VendorOuiCarConnectivity & 0xFF);
-    p[17] = static_cast<std::byte>((VendorOuiCarConnectivity >> 8) & 0xFF);
-    p[18] = static_cast<std::byte>((VendorOuiCarConnectivity >> 16) & 0xFF);
+    p[16] = static_cast<std::byte>(VendorOuiAliro & 0xFF);
+    p[17] = static_cast<std::byte>((VendorOuiAliro >> 8) & 0xFF);
+    p[18] = static_cast<std::byte>((VendorOuiAliro >> 16) & 0xFF);
     p[19] = static_cast<std::byte>(header.messageId);
     p[20] = static_cast<std::byte>(header.payloadLength);
     writeLe16(HeaderTermination2Ie, &p[21]);
@@ -133,7 +139,7 @@ core::Result<FinalDataPayload> FrameCodec::decodeFinalData(std::span<const std::
     finalData.hopFlag = static_cast<uint8_t>(p[6]);
     finalData.roundIndex = core::SlotIndex{readLe16(&p[7])};
     finalData.finalStsIndex = core::StsIndex{readLe32(&p[9])};
-    finalData.txTimestampFinalDtu = readLe32(&p[13]);
+    finalData.pollToFinalTxDeltaDtu = readLe32(&p[13]);
 
     const auto numResponders = static_cast<uint8_t>(p[17]);
     if (numResponders > MaxRespondersSupported) {
@@ -150,7 +156,7 @@ core::Result<FinalDataPayload> FrameCodec::decodeFinalData(std::span<const std::
         const std::byte* r = &payload[FinalDataHeaderLength + (i * ResponderRecordLength)];
         ResponderTimestampReport report{};
         report.responderIndex = static_cast<uint8_t>(r[0]);
-        report.rxTimestampDtu = readLe32(&r[1]);
+        report.pollToResponseDeltaDtu = readLe32(&r[1]);
         report.timestampUncertainty = static_cast<uint8_t>(r[5]);
         report.rangingStatus = static_cast<uint8_t>(r[6]);
         finalData.responderReports.push_back(report);
@@ -171,13 +177,13 @@ core::Result<size_t> FrameCodec::encodeFinalData(const FinalDataPayload& finalDa
     p[6] = static_cast<std::byte>(finalData.hopFlag);
     writeLe16(finalData.roundIndex.get(), &p[7]);
     writeLe32(finalData.finalStsIndex.get(), &p[9]);
-    writeLe32(finalData.txTimestampFinalDtu, &p[13]);
+    writeLe32(finalData.pollToFinalTxDeltaDtu, &p[13]);
     p[17] = static_cast<std::byte>(finalData.responderReports.size());
 
     for (size_t i = 0; i < finalData.responderReports.size(); ++i) {
         std::byte* r = &output[FinalDataHeaderLength + (i * ResponderRecordLength)];
         r[0] = static_cast<std::byte>(finalData.responderReports[i].responderIndex);
-        writeLe32(finalData.responderReports[i].rxTimestampDtu, &r[1]);
+        writeLe32(finalData.responderReports[i].pollToResponseDeltaDtu, &r[1]);
         r[5] = static_cast<std::byte>(finalData.responderReports[i].timestampUncertainty);
         r[6] = static_cast<std::byte>(finalData.responderReports[i].rangingStatus);
     }

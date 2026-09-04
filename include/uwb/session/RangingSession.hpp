@@ -49,6 +49,9 @@ enum class SessionState {
 struct RangingResult {
     core::SessionId sessionId{0};
     core::BlockIndex blockIndex{0};
+    // 0 for the first active round of the block, 1 for the second (two-round
+    // MAC Mode only — lets the consumer compare the pair for front/behind).
+    uint8_t roundInBlock{0};
     core::DistanceMm distance{0};
     ranging::RangeIntegrityReport integrity{};
     uint64_t timestampUs{0};
@@ -95,6 +98,8 @@ public:
     core::Result<void> suspend();
     core::Result<void> resume();
 
+    core::Result<void> resumeWithAnchor(core::StsIndex newStsIndex0, uint64_t newTime0Us);
+
     [[nodiscard]] SessionState getState() const noexcept { return m_state; }
     [[nodiscard]] core::SessionId getSessionId() const noexcept { return m_params.sessionId; }
 
@@ -124,9 +129,12 @@ private:
     std::array<std::byte, 16> m_mupsk1{};
     std::array<std::byte, 16> m_saltedHash{};
     core::MacAddresses m_addresses{};
+    bool m_materialValid{false};
+    core::StatusCode m_lastDeriveError{core::StatusCode::InvalidParameter};
 
     // Slot-Specific State & Timestamps
     core::BlockIndex m_currentBlock{0};
+    core::SlotIndex m_currentRound{0};
     core::StsIndex m_armedPollStsIndex{0};
     uint64_t m_pollRxTimestampDtu{0};
     uint64_t m_respTxTimestampDtu{0};
@@ -142,9 +150,10 @@ private:
     bool m_finalNlosDiagValid{false};
 
     // Pre-warmed slot keys: all SP3 legs of a block (Poll/Response/Final) are derivable
-    // during the block idle — dURSK is round-constant and the Poll STS index advances by a
-    // fixed per-block stride — so the PrePoll handler only performs fast register writes
-    // before arming, and no KDF ever runs on the Poll->Response->Final critical path.
+    // during the block idle — dURSK is round-constant and the Poll STS index follows the
+    // STS schedule (fixed stride within a round position) — so the PrePoll handler only
+    // performs fast register writes before arming, and no KDF ever runs on the
+    // Poll->Response->Final critical path.
     struct CycleKeys {
         core::StsIndex pollStsIndex{0};
         crypto::CccKeyDerivationEngine::SlotCryptoMaterial poll{};
@@ -174,9 +183,12 @@ private:
     void transitionTo(SessionState newState) noexcept;
     void armPrePollListening();
     void processStashedPrePoll();
+    // Derives m_mupsk1/2, m_mursk, m_saltedHash, m_addresses from m_ursk + m_params.
+    // Sets m_materialValid (false on failure, error code in m_lastDeriveError).
+    void deriveSessionMaterial();
 
-    // STS-index advance between consecutive blocks' Poll slots (all slots in a block count,
-    // including unused ones). slotsPerRound * roundsPerBlock.
+    // STS-index advance between consecutive blocks' Poll slots (all slots in a block
+    // count, including unused ones): roundsPerBlock * slotsPerRound.
     [[nodiscard]] uint32_t blockStsStride() const noexcept;
     // Derive slot keys for the whole next cycle (Poll/Response/Final) into m_warm
     void refreshWarmKeys(core::StsIndex acceptedPollStsIndex);
@@ -193,6 +205,19 @@ private:
     void handleFinalDataReception(const transceiver::RxSuccessEvent& event);
 
     [[nodiscard]] bool isBlockParityEligible(core::BlockIndex block) const noexcept;
+
+    [[nodiscard]] uint32_t roundsPerBlock() const noexcept;
+    // Absolute STS index of the Poll slot of (block, round). Returns 0 when the
+    // schedule can't be computed (invalid params).
+    [[nodiscard]] core::StsIndex pollStsIndexFor(core::BlockIndex block,
+                                                 core::SlotIndex round) const noexcept;
+    [[nodiscard]] core::SlotIndex scheduledRoundFor(core::BlockIndex block) const noexcept;
+    // Warm-refresh target: the next exchange after the one at (block, round).
+    // Returns false when the next exchange is not schedulable (adaptive hopping,
+    // invalid schedule) — the caller then falls back to the bootstrap path.
+    [[nodiscard]] bool nextScheduledExchange(core::BlockIndex block, core::SlotIndex round,
+                                             core::BlockIndex& nextBlock,
+                                             core::SlotIndex& nextRound) const noexcept;
 };
 
 } // namespace uwb::session

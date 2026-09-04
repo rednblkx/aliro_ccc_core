@@ -25,7 +25,9 @@ enum class MessageType : uint8_t {
     SuspendRequest      = 0x04,
     SuspendResponse     = 0x05,
     ResumeRequest       = 0x06,
-    ResumeResponse      = 0x07
+    ResumeResponse      = 0x07,
+    EventNotification   = 0x00,
+    RangingNotification = 0x01
 };
 
 enum class AttributeTag : uint8_t {
@@ -51,6 +53,8 @@ enum class AttributeTag : uint8_t {
 
 struct RangingSessionParameters {
     core::SessionId sessionId{0};
+    // phone selected via the GATT characteristic — byte 0..1 of the SaltedHash input.
+    std::array<uint8_t, 2> protocolVersion{0x01, 0x00};
     uint16_t uwbConfigId{0};
     uint8_t pulseShapeCombo{0};
     core::UwbChannel channel{core::UwbChannel::Channel9};
@@ -66,6 +70,13 @@ struct RangingSessionParameters {
     uint8_t macMode{0};
     uint8_t responderCount{1};
 };
+
+constexpr uint8_t buildMacMode(bool twoRounds, uint8_t roundOffset) noexcept {
+    if (!twoRounds) {
+        return 0x00;
+    }
+    return static_cast<uint8_t>(0x40 | (roundOffset & 0x3F));
+}
 
 struct DeviceCapabilities {
     std::vector<uint16_t> supportedConfigIds{0x0000};
@@ -105,6 +116,17 @@ public:
 
     [[nodiscard]] static core::Result<std::vector<std::byte>> buildSuspendResponse(
         bool accept);
+
+    [[nodiscard]] static core::Result<std::vector<std::byte>> buildResumeRequest(
+        core::SessionId sessionId);
+
+    [[nodiscard]] static core::Result<void> parseResumeResponse(
+        std::span<const std::byte> payload,
+        core::StsIndex& outStsIndex0,
+        uint64_t& outTime0Us);
+
+    [[nodiscard]] static core::Result<std::vector<std::byte>> buildRangingNotification(
+        uint8_t attributeId);
 };
 
 } // namespace uwb::protocol::setup

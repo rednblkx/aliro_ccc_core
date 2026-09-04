@@ -230,6 +230,9 @@ core::Result<void> SetupMessageCodec::parseM2(
                 if (elem.value.size() != 1) return std::unexpected(core::StatusCode::MalformedFrame);
                 const auto peerSlotMask = static_cast<uint8_t>(elem.value[0]);
                 const uint8_t common = peerSlotMask & localCaps.slotBitmask;
+                if (common == 0) {
+                    return std::unexpected(core::StatusCode::InvalidParameter);
+                }
                 uint8_t chaps = 3;
                 for (uint8_t idx = 0; idx < 7; ++idx) {
                     if ((common >> idx) & 0x01) {
@@ -254,16 +257,20 @@ core::Result<void> SetupMessageCodec::parseM2(
                 const uint8_t peerFira = HopCccToFira(peerCcc);
                 const uint8_t common = peerFira & localCaps.hoppingConfigBitmask;
 
-                // Negotiate single selected mode: Disabled (0x80) preferred — the responder
-                // does not implement the hopping schedule (HOP Mode Key from M4 is unused),
-                // and a hopping exchange makes the per-block Poll STS index unpredictable.
-                // Fall back to Continuous Default (0x50) if the peer offers nothing else.
+                // Negotiate single selected mode: Disabled (0x80) preferred — the
+                // responder does not implement the hopping schedule (HOP Mode Key from
+                // M4 is unused on the default-sequence formula side; Pre-Poll roundIndex
+                // is followed passively). Continuous Default (0x50) and Adaptive Default
+                // (0x30) are accepted as fallbacks; AES-based sequences are rejected
                 if ((common & HopComboNoHopping) == HopComboNoHopping) {
                     outParams.hoppingMode = core::HoppingMode::Disabled;
                     outParams.hoppingConfigBitmask = HopFiraToCcc(HopComboNoHopping); // 0x80
                 } else if ((common & HopComboContinuousDefault) == HopComboContinuousDefault) {
                     outParams.hoppingMode = core::HoppingMode::ContinuousDefault;
                     outParams.hoppingConfigBitmask = HopFiraToCcc(HopComboContinuousDefault); // 0x50
+                } else if ((common & HopComboAdaptiveDefault) == HopComboAdaptiveDefault) {
+                    outParams.hoppingMode = core::HoppingMode::AdaptiveDefault;
+                    outParams.hoppingConfigBitmask = HopFiraToCcc(HopComboAdaptiveDefault); // 0x30
                 } else {
                     return std::unexpected(core::StatusCode::InvalidParameter);
                 }
@@ -292,7 +299,7 @@ core::Result<std::vector<std::byte>> SetupMessageCodec::buildM3(
     writer.addU8(AttributeTag::SlotsPerRound, params.slotsPerRound);              // Tag 0x0B
     writer.addU32(AttributeTag::SyncCodeIndexBitmask, localCaps.syncCodeBitmask); // Tag 0x06 (e.g. 0x00000F00)
     writer.addU8(AttributeTag::HoppingConfigBitmask, params.hoppingConfigBitmask);// Tag 0x08 (0x50 or 0x80)
-    writer.addU8(AttributeTag::MacMode, localCaps.macMode);                       // Tag 0x0F (0x00)
+    writer.addU8(AttributeTag::MacMode, localCaps.macMode);                       // Tag 0x0F
 
     return writer.finalize();
 }
@@ -345,6 +352,56 @@ core::Result<std::vector<std::byte>> SetupMessageCodec::buildSuspendResumeReques
 core::Result<std::vector<std::byte>> SetupMessageCodec::buildSuspendResponse(bool accept) {
     TlvWriter writer(ProtocolCategory::UwbRangingService, MessageType::SuspendResponse);
     writer.addU8(AttributeTag::Status, accept ? 0x00 : 0x01);
+    return writer.finalize();
+}
+
+core::Result<std::vector<std::byte>> SetupMessageCodec::buildResumeRequest(
+    core::SessionId sessionId) {
+    TlvWriter writer(ProtocolCategory::UwbRangingService, MessageType::ResumeRequest);
+    writer.addU32(AttributeTag::SessionId, sessionId.get());
+    return writer.finalize();
+}
+
+core::Result<void> SetupMessageCodec::parseResumeResponse(
+    std::span<const std::byte> payload,
+    core::StsIndex& outStsIndex0,
+    uint64_t& outTime0Us) {
+    bool haveSts = false;
+    bool haveTime = false;
+    auto elements = parseTlvStream(payload);
+    if (!elements) return std::unexpected(elements.error());
+    for (const auto& elem : *elements) {
+        switch (elem.tag) {
+            case AttributeTag::StsIndex0:
+                if (elem.value.size() != 4) return std::unexpected(core::StatusCode::MalformedFrame);
+                outStsIndex0 = core::StsIndex{readBe32(elem.value.data())};
+                haveSts = true;
+                break;
+            case AttributeTag::UwbTime0:
+                if (elem.value.size() != 8) return std::unexpected(core::StatusCode::MalformedFrame);
+                outTime0Us = readBe64(elem.value.data());
+                haveTime = true;
+                break;
+            case AttributeTag::Status:
+                if (elem.value.size() != 1) return std::unexpected(core::StatusCode::MalformedFrame);
+                if (elem.value[0] != std::byte{0x00}) {
+                    return std::unexpected(core::StatusCode::InvalidParameter);
+                }
+                break;
+            default:
+                break;
+        }
+    }
+    if (!haveSts || !haveTime) {
+        return std::unexpected(core::StatusCode::MalformedFrame);
+    }
+    return {};
+}
+
+core::Result<std::vector<std::byte>> SetupMessageCodec::buildRangingNotification(
+    uint8_t attributeId) {
+    TlvWriter writer(ProtocolCategory::Notification, MessageType::RangingNotification);
+    writer.addBytes(static_cast<AttributeTag>(attributeId), {});
     return writer.finalize();
 }
 

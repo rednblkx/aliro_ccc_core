@@ -3,6 +3,7 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
+#include "uwb/ranging/HoppingCalculator.hpp"
 
 namespace uwb::session {
 
@@ -80,6 +81,48 @@ void RangingSession::transitionTo(SessionState newState) noexcept {
     m_state = newState;
 }
 
+void RangingSession::deriveSessionMaterial() {
+    auto mupsk1Res = m_kdf.deriveMupsk1(m_ursk);
+    if (!mupsk1Res) { m_lastDeriveError = mupsk1Res.error(); return; }
+    m_mupsk1 = *mupsk1Res;
+
+    auto mupsk2Res = m_kdf.deriveMupsk2(m_ursk);
+    if (!mupsk2Res) { m_lastDeriveError = mupsk2Res.error(); return; }
+    m_mupsk2 = *mupsk2Res;
+
+    auto murskRes = m_kdf.deriveMursk(m_ursk);
+    if (!murskRes) { m_lastDeriveError = murskRes.error(); return; }
+    m_mursk = *murskRes;
+
+    std::array<std::byte, 17> rcfg{};
+    rcfg[0] = static_cast<std::byte>(m_params.protocolVersion[0]);
+    rcfg[1] = static_cast<std::byte>(m_params.protocolVersion[1]);
+    rcfg[2] = static_cast<std::byte>((m_params.uwbConfigId >> 8) & 0xFF);
+    rcfg[3] = static_cast<std::byte>(m_params.uwbConfigId & 0xFF);
+    rcfg[4] = static_cast<std::byte>((m_params.sessionId.get() >> 24) & 0xFF);
+    rcfg[5] = static_cast<std::byte>((m_params.sessionId.get() >> 16) & 0xFF);
+    rcfg[6] = static_cast<std::byte>((m_params.sessionId.get() >> 8) & 0xFF);
+    rcfg[7] = static_cast<std::byte>(m_params.sessionId.get() & 0xFF);
+    rcfg[8] = static_cast<std::byte>((m_params.stsIndex0.get() >> 24) & 0xFF);
+    rcfg[9] = static_cast<std::byte>((m_params.stsIndex0.get() >> 16) & 0xFF);
+    rcfg[10] = static_cast<std::byte>((m_params.stsIndex0.get() >> 8) & 0xFF);
+    rcfg[11] = static_cast<std::byte>(m_params.stsIndex0.get() & 0xFF);
+    rcfg[12] = static_cast<std::byte>(m_params.responderCount);
+    rcfg[13] = static_cast<std::byte>(m_params.durationMs / 96);
+    rcfg[14] = static_cast<std::byte>(m_params.slotsPerRound);
+    rcfg[15] = static_cast<std::byte>(m_params.slotDurationRstu / 400);
+    rcfg[16] = static_cast<std::byte>(m_params.pulseShapeCombo);
+
+    auto saltedHashRes = m_kdf.deriveSaltedHash(m_ursk, rcfg);
+    if (!saltedHashRes) { m_lastDeriveError = saltedHashRes.error(); return; }
+    m_saltedHash = *saltedHashRes;
+
+    auto addrRes = m_kdf.deriveAddresses(m_mupsk2, m_params.stsIndex0);
+    if (!addrRes) { m_lastDeriveError = addrRes.error(); return; }
+    m_addresses = *addrRes;
+    m_materialValid = true;
+}
+
 core::Result<void> RangingSession::start(
         std::span<const std::byte, 32> ursk,
         const protocol::setup::RangingSessionParameters& params,
@@ -103,44 +146,10 @@ core::Result<void> RangingSession::start(
         m_logger->log(hal::LogLevel::Info, "RangingSession", buf);
     }
 
-    auto mupsk1Res = m_kdf.deriveMupsk1(m_ursk);
-    if (!mupsk1Res) return std::unexpected(mupsk1Res.error());
-    m_mupsk1 = *mupsk1Res;
-
-    auto mupsk2Res = m_kdf.deriveMupsk2(m_ursk);
-    if (!mupsk2Res) return std::unexpected(mupsk2Res.error());
-    m_mupsk2 = *mupsk2Res;
-
-    auto murskRes = m_kdf.deriveMursk(m_ursk);
-    if (!murskRes) return std::unexpected(murskRes.error());
-    m_mursk = *murskRes;
-
-    std::array<std::byte, 17> rcfg{};
-    rcfg[0] = std::byte{0x01};
-    rcfg[1] = std::byte{0x00};
-    rcfg[2] = static_cast<std::byte>((m_params.uwbConfigId >> 8) & 0xFF);
-    rcfg[3] = static_cast<std::byte>(m_params.uwbConfigId & 0xFF);
-    rcfg[4] = static_cast<std::byte>((m_params.sessionId.get() >> 24) & 0xFF);
-    rcfg[5] = static_cast<std::byte>((m_params.sessionId.get() >> 16) & 0xFF);
-    rcfg[6] = static_cast<std::byte>((m_params.sessionId.get() >> 8) & 0xFF);
-    rcfg[7] = static_cast<std::byte>(m_params.sessionId.get() & 0xFF);
-    rcfg[8] = static_cast<std::byte>((m_params.stsIndex0.get() >> 24) & 0xFF);
-    rcfg[9] = static_cast<std::byte>((m_params.stsIndex0.get() >> 16) & 0xFF);
-    rcfg[10] = static_cast<std::byte>((m_params.stsIndex0.get() >> 8) & 0xFF);
-    rcfg[11] = static_cast<std::byte>(m_params.stsIndex0.get() & 0xFF);
-    rcfg[12] = static_cast<std::byte>(m_params.responderCount);
-    rcfg[13] = static_cast<std::byte>(m_params.durationMs / 96);
-    rcfg[14] = static_cast<std::byte>(m_params.slotsPerRound);
-    rcfg[15] = static_cast<std::byte>(m_params.slotDurationRstu / 400);
-    rcfg[16] = static_cast<std::byte>(m_params.pulseShapeCombo);
-
-    auto saltedHashRes = m_kdf.deriveSaltedHash(m_ursk, rcfg);
-    if (!saltedHashRes) return std::unexpected(saltedHashRes.error());
-    m_saltedHash = *saltedHashRes;
-
-    auto addrRes = m_kdf.deriveAddresses(m_mupsk2, m_params.stsIndex0);
-    if (!addrRes) return std::unexpected(addrRes.error());
-    m_addresses = *addrRes;
+    deriveSessionMaterial();
+    if (!m_materialValid) {
+        return std::unexpected(m_lastDeriveError);
+    }
 
     if (m_logger) {
         char buf[160];
@@ -221,6 +230,39 @@ core::Result<void> RangingSession::resume() {
     return {};
 }
 
+core::Result<void> RangingSession::resumeWithAnchor(core::StsIndex newStsIndex0,
+                                                    uint64_t newTime0Us) {
+    if (m_state != SessionState::Suspended) {
+        return std::unexpected(core::StatusCode::InvalidState);
+    }
+    (void)newTime0Us; // the responder schedules from received Pre-Polls; Time0 is informational here
+
+    m_params.stsIndex0 = newStsIndex0;
+    m_materialValid = false;
+    deriveSessionMaterial();
+    if (!m_materialValid) {
+        return std::unexpected(m_lastDeriveError);
+    }
+
+    if (m_logger) {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "Resumed with anchor sts0=0x%08" PRIX32,
+                      newStsIndex0.get());
+        m_logger->log(hal::LogLevel::Info, "RangingSession", buf);
+    }
+
+    m_hasReceivedPrePollCounter = false;
+    m_hasReceivedFinalDataCounter = false;
+    m_hasPrePollStsIndex = false;
+    m_lastPrePollStsIndex = core::StsIndex{0};
+    m_warmValid = false;
+    m_armedKeysValid = false;
+    m_filter.reset();
+
+    armPrePollListening();
+    return {};
+}
+
 bool RangingSession::isBlockParityEligible(core::BlockIndex block) const noexcept {
     if (m_nodeConfig.blockParityFilter < 0) {
         return true;
@@ -248,6 +290,7 @@ void RangingSession::processStashedPrePoll() {
 
     if (auto prePoll = decodePrePollFrame(frame, transceiver::RxSuccessEvent{})) {
         m_currentBlock = prePoll->rangingBlock;
+        m_currentRound = prePoll->roundIndex;
         if (isBlockParityEligible(m_currentBlock)) {
             refreshWarmKeys(prePoll->pollStsIndex);
         }
@@ -390,6 +433,7 @@ void RangingSession::handlePrePollReception(const transceiver::RxSuccessEvent& e
         return;
     }
     m_currentBlock = prePollRes->rangingBlock;
+    m_currentRound = prePollRes->roundIndex;
     if (!isBlockParityEligible(m_currentBlock)) {
         armPrePollListening();
         return;
@@ -475,15 +519,18 @@ core::Result<protocol::PrePollPayload> RangingSession::decodePrePollFrame(
 }
 
 void RangingSession::refreshWarmKeys(core::StsIndex acceptedPollStsIndex) {
-    const uint32_t stride = blockStsStride();
-    if (stride == 0) {
+    (void)acceptedPollStsIndex;
+    core::BlockIndex nextBlock{0};
+    core::SlotIndex nextRound{0};
+    if (!nextScheduledExchange(m_currentBlock, m_currentRound, nextBlock, nextRound)) {
         m_warmValid = false;
         return;
     }
-    if (deriveCycleKeys(core::StsIndex{acceptedPollStsIndex.get() + stride}, m_warm)) {
+    const auto expectedPollSts = pollStsIndexFor(nextBlock, nextRound);
+    if (deriveCycleKeys(expectedPollSts, m_warm)) {
         m_warmValid = true;
-        HOT_LOG(hal::LogLevel::Debug, "[WARM] next Poll STS idx=%" PRIu32,
-                m_warm.pollStsIndex.get());
+        HOT_LOG(hal::LogLevel::Debug, "[WARM] blk=%u round=%u Poll STS idx=%" PRIu32,
+                nextBlock.get(), nextRound.get(), m_warm.pollStsIndex.get());
     } else {
         m_warmValid = false;
     }
@@ -515,22 +562,90 @@ core::Result<void> RangingSession::deriveCycleKeys(core::StsIndex pollStsIndex, 
     return {};
 }
 
-uint32_t RangingSession::blockStsStride() const noexcept {
+uint32_t RangingSession::roundsPerBlock() const noexcept {
     if (m_params.slotDurationRstu == 0 || m_params.slotsPerRound == 0 || m_params.durationMs == 0) {
         return 0;
     }
-    // 1 RSTU = 416/499.2 MHz = 833.33 ns = 5/6 µs -> slot = RSTU * 5/6 µs
+    // 1 RSTU = 416/499.2 MHz = 833.33 ns = 5/6 µs -> round = slots * slot * 5/6 µs.
     const uint64_t roundDurationUs =
         static_cast<uint64_t>(m_params.slotsPerRound) *
         static_cast<uint64_t>(m_params.slotDurationRstu) * 5ULL / 6ULL;
     if (roundDurationUs == 0) {
         return 0;
     }
-    // rounds per block = durationMs / round duration; every slot of the block advances
-    // the STS index, including unused ones
     return static_cast<uint32_t>(
-        (static_cast<uint64_t>(m_params.durationMs) * 1000ULL) / roundDurationUs) *
-        m_params.slotsPerRound;
+        (static_cast<uint64_t>(m_params.durationMs) * 1000ULL) / roundDurationUs);
+}
+
+uint32_t RangingSession::blockStsStride() const noexcept {
+    const uint32_t rounds = roundsPerBlock();
+    if (rounds == 0) {
+        return 0;
+    }
+    return rounds * m_params.slotsPerRound;
+}
+
+core::StsIndex RangingSession::pollStsIndexFor(core::BlockIndex block,
+                                               core::SlotIndex round) const noexcept {
+    const uint64_t sts = static_cast<uint64_t>(m_params.stsIndex0.get()) +
+                         (static_cast<uint64_t>(block.get()) * blockStsStride() +
+                          static_cast<uint64_t>(round.get()) * m_params.slotsPerRound) + 1U;
+    return core::StsIndex{static_cast<uint32_t>(sts)};
+}
+
+core::SlotIndex RangingSession::scheduledRoundFor(core::BlockIndex block) const noexcept {
+    switch (m_params.hoppingMode) {
+        case core::HoppingMode::ContinuousDefault: {
+            // HOP_Mode_Key is 0 in no-hopping mode; in continuous mode the initiator
+            // sends the default-sequence key in M4 (big-endian on the wire).
+            uint32_t hopKey = 0;
+            for (size_t i = 0; i < m_params.hopModeKey.size(); ++i) {
+                hopKey = (hopKey << 8) | static_cast<uint8_t>(m_params.hopModeKey[i]);
+            }
+            const uint32_t rounds = roundsPerBlock();
+            if (rounds == 0 || rounds > 0xFFFF) {
+                return core::SlotIndex{0};
+            }
+            return ranging::HoppingCalculator::calculateRoundIndex(
+                block, hopKey, static_cast<uint16_t>(rounds));
+        }
+        case core::HoppingMode::Disabled:
+        default:
+            // No hopping: every block runs round 0. Adaptive modes are not scheduled
+            // here — the initiator announces each block's round in Pre-Poll/Final_Data.
+            return core::SlotIndex{0};
+    }
+}
+
+bool RangingSession::nextScheduledExchange(core::BlockIndex block, core::SlotIndex round,
+                                           core::BlockIndex& nextBlock,
+                                           core::SlotIndex& nextRound) const noexcept {
+    switch (m_params.hoppingMode) {
+        case core::HoppingMode::Disabled:
+        case core::HoppingMode::ContinuousDefault:
+            break;
+        default:
+            // Adaptive modes: the initiator picks and announces each block's round,
+            // so the next exchange cannot be predicted — warm keys stay invalid and
+            // every block runs the bootstrap path.
+            return false;
+    }
+    if (roundsPerBlock() == 0) {
+        return false;
+    }
+    const bool twoRounds = (m_params.macMode & 0xC0) == 0x40;
+    if (twoRounds && round == scheduledRoundFor(block)) {
+        const uint8_t ok = m_params.macMode & 0x3F;
+        if (ok == 0) {
+            return false;
+        }
+        nextBlock = block;
+        nextRound = core::SlotIndex{static_cast<uint16_t>(round.get() + ok)};
+        return nextRound.get() < roundsPerBlock();
+    }
+    nextBlock = core::BlockIndex{static_cast<uint16_t>(block.get() + 1)};
+    nextRound = scheduledRoundFor(nextBlock);
+    return true;
 }
 
 void RangingSession::handlePollReception(const transceiver::RxSuccessEvent& event) {
@@ -688,11 +803,19 @@ void RangingSession::handleFinalDataReception(const transceiver::RxSuccessEvent&
     );
 
     if (it != finalData->responderReports.end()) {
+        // DS-TWR quadrilateral (all deltas in DTU, mixing initiator- and responder-side
+        // quantities is what cancels the clock offset):
+        //   round1  = responder record  = initiator POLL RMARKER -> response RMARKER
+        //   reply1  = local             = responder POLL RMARKER -> response TX (RMARKER)
+        //   round2  = local             = responder response TX (RMARKER) -> Final RMARKER
+        //   reply2  = FINAL_TX delta minus responder record
+        //             = initiator POLL RMARKER -> Final RMARKER, minus the record above
+        //             = initiator Final RMARKER -> response RMARKER (initiator-side reply)
         ranging::DoubleSidedTwrTimestamps dsTs{
-            .round1Dtu = it->rxTimestampDtu,
+            .round1Dtu = it->pollToResponseDeltaDtu,
             .reply1Dtu = static_cast<uint32_t>(m_respTxTimestampDtu - m_pollRxTimestampDtu),
             .round2Dtu = static_cast<uint32_t>(m_finalRxTimestampDtu - m_respTxTimestampDtu),
-            .reply2Dtu = static_cast<uint32_t>(finalData->txTimestampFinalDtu - it->rxTimestampDtu)
+            .reply2Dtu = static_cast<uint32_t>(finalData->pollToFinalTxDeltaDtu - it->pollToResponseDeltaDtu)
         };
 
         auto distanceRes = ranging::DistanceEstimator::calculateDistance(dsTs, m_nodeConfig.antennaDelayBias);
@@ -739,6 +862,8 @@ void RangingSession::handleFinalDataReception(const transceiver::RxSuccessEvent&
                 RangingResult result{
                     .sessionId = m_params.sessionId,
                     .blockIndex = m_currentBlock,
+                    .roundInBlock = (m_currentRound == scheduledRoundFor(m_currentBlock))
+                                        ? 0u : 1u,
                     .distance = *distanceRes,
                     .integrity = integrity,
                     .timestampUs = m_clock.getMonotonicTimeUs(),

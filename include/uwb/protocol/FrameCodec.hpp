@@ -21,7 +21,8 @@ inline constexpr uint8_t  SecurityControlField = 0x16;
 inline constexpr uint8_t  KeyIndexField = 0xAA;
 inline constexpr uint16_t VendorIeHeader = 0x0005;
 inline constexpr uint32_t VendorOuiCarConnectivity = 0x04DF69;
-inline constexpr uint32_t VendorOuiUltraWideLock = 0x4A191B;
+inline constexpr uint32_t VendorOuiAliro = 0x4A191B;
+inline constexpr uint32_t VendorOuiUltraWideLock = 0x4A191B; // deprecated alias
 inline constexpr uint16_t HeaderTermination2Ie = 0x3F80;
 
 enum class MessageIdentifier : uint8_t {
@@ -47,7 +48,7 @@ struct PrePollPayload {
 
 struct ResponderTimestampReport {
     uint8_t responderIndex{0};
-    uint32_t rxTimestampDtu{0};
+    uint32_t pollToResponseDeltaDtu{0};
     uint8_t timestampUncertainty{0};
     uint8_t rangingStatus{0};
 };
@@ -58,7 +59,7 @@ struct FinalDataPayload {
     uint8_t hopFlag{0};
     core::SlotIndex roundIndex{0};
     core::StsIndex finalStsIndex{0};
-    uint32_t txTimestampFinalDtu{0};
+    uint32_t pollToFinalTxDeltaDtu{0};
     std::vector<ResponderTimestampReport> responderReports{};
 };
 
