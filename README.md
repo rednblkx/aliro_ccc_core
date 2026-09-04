@@ -1,6 +1,6 @@
 # aliro_ccc_core
 
-Platform-agnostic C++20 library implementing an Aliro UWB ranging **responder** for the Qorvo/Decawave **DW3000** transceiver. It covers the full responder path: CCC key derivation and STS-secured frame handling (Aliro SP0/SP3), the Poll/Response/Final two-way ranging exchange, and range output through a consensus filter. Hardware access is abstracted behind interfaces, so the library runs both on a host (for tests) and on an MCU when the HAL is implemented for the target platform.
+Platform-agnostic C++20 library implementing an Aliro UWB ranging **responder** for the Qorvo **DW3000** transceiver. It covers the full responder path: CCC key derivation and STS-secured frame handling (Aliro SP0/SP3), the Poll/Response/Final two-way ranging exchange, and range output through a consensus filter. Hardware access is abstracted behind interfaces, so the library runs both on a host (for tests) and on an MCU when the HAL is implemented for the target platform.
 
 ## Layout
 
@@ -69,8 +69,10 @@ From then on the library is purely event-driven: call the `ITransceiverListener`
 - Keep key derivation and decryption off the radio-arm critical path; the session pre-derives per-slot keys for this reason.
 - The build treats warnings as errors-in-spirit (`-Wall -Wextra -Wconversion -Wsign-conversion …`): new code must be warning-clean.
 
-## License
+## License & Legal
 
-[MIT](LICENSE)
+This project is licensed under MIT — see [LICENSE](LICENSE), excluding the linked DW3000 driver, for which it supplies it's own licenses, see repo [here](https://github.com/br101/dw3000-decadriver-source)
 
-For DW3000 driver see repo [here](https://github.com/br101/dw3000-decadriver-source)
+Aliro is a trademark of Connectivity Standards Alliance (CSA)
+
+Qorvo is a trademark of QORVO US, INC.
