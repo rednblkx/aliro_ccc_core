@@ -60,6 +60,9 @@ public:
     // Fast-path Dynamic STS Management
     [[nodiscard]] core::Result<void> loadStsKey(std::span<const std::byte, 16> key);
     [[nodiscard]] core::Result<void> loadStsIv(std::span<const std::byte, 16> iv);
+    // Combined key+IV load: one contiguous 32-byte register write + LOAD_IV strobe
+    // (2 SPI transactions instead of 10) — use on every arm path.
+    [[nodiscard]] core::Result<void> loadStsKeyIv(std::span<const std::byte, 16> key, std::span<const std::byte, 16> iv);
     [[nodiscard]] core::Result<void> configureStsMode(StsMode mode);
 
     // Precision Timed Scheduling

@@ -191,6 +191,18 @@ core::Result<void> DW3000Controller::configurePhy(const TransceiverConfig& confi
     }
     s_stsKeyValid = false;
 
+    // Permanently enable the frame-wait timeout: RX_FWTO==0 disables it at runtime, and
+    // every ranging arm programs a nonzero RX_FWTO. Setting the SYS_CFG.RXWTOE bit once
+    // here lets startDelayedRx/startDelayedTx skip the per-arm read-modify-write of
+    // SYS_CFG (one fewer SPI transaction inside the arm deadline). Note dwt_configure
+    // rewrites SYS_CFG (PHR/STS/PDOA bits), so this must come after it.
+    {
+        uint8_t sysCfg[4] = {0};
+        dwt_readfromdevice(SYS_CFG_ID, 0U, 4U, sysCfg);
+        sysCfg[1] |= static_cast<uint8_t>((SYS_CFG_RXWTOE_BIT_MASK >> 8U) & 0xFFU);
+        dwt_writetodevice(SYS_CFG_ID, 0U, 4U, sysCfg);
+    }
+
     dwt_txconfig_t txConfig;
     std::memset(&txConfig, 0, sizeof(txConfig));
     txConfig.PGdly = 0x34;
@@ -273,6 +285,28 @@ core::Result<void> DW3000Controller::loadStsIv(std::span<const std::byte, 16> iv
     return {};
 }
 
+core::Result<void> DW3000Controller::loadStsKeyIv(std::span<const std::byte, 16> key, std::span<const std::byte, 16> iv) {
+    // STS_KEY0..3 + STS_IV0..3 are one contiguous 32-byte register block (0x2000C..0x2002C):
+    // a single SPI write replaces the 8 per-word register writes the two separate loader
+    // functions perform (each word = one transaction). The LOAD_IV strobe (STS_CTRL at
+    // 0x20004, not adjacent) stays a second tiny transaction.
+    const bool keyChanged = !(s_stsKeyValid && std::equal(key.begin(), key.end(), s_lastStsKey.begin()));
+
+    std::array<uint8_t, 32> blob{};
+    for (size_t i = 0; i < 16; ++i) {
+        blob[i] = static_cast<uint8_t>(key[15 - i]);
+        blob[16 + i] = static_cast<uint8_t>(iv[15 - i]);
+    }
+    dwt_writetodevice(STS_KEY0_ID, 0U, static_cast<uint16_t>(blob.size()), blob.data());
+
+    if (keyChanged) {
+        std::memcpy(s_lastStsKey.data(), key.data(), 16);
+        s_stsKeyValid = true;
+    }
+    dwt_configurestsloadiv();
+    return {};
+}
+
 core::Result<void> DW3000Controller::configureStsMode(StsMode mode) {
     uint8_t m = DWT_STS_MODE_OFF;
     if (mode == StsMode::StandardMode1) m = DWT_STS_MODE_1;
@@ -288,7 +322,13 @@ static void clearHpdwarn() {
 
 core::Result<void> DW3000Controller::startDelayedTx(uint32_t txStartTimeDtu, std::span<const std::byte> frameData, bool rangingFrame) {
     clearHpdwarn();
-    dwt_setdelayedtrxtime(txStartTimeDtu);
+    // Same contiguous-register trick as startDelayedRx: a single DX_TIME write replaces
+    // dwt_setdelayedtrxtime's transaction (the DREF_TIME/RX_FWTO words written alongside
+    // are harmless for TX).
+    std::array<uint8_t, 12> delayRegs{};
+    const uint32_t dxTime = txStartTimeDtu & 0xFFFFFFFEUL;
+    std::memcpy(&delayRegs[0], &dxTime, 4);
+    dwt_writetodevice(DX_TIME_ID, 0U, static_cast<uint16_t>(delayRegs.size()), delayRegs.data());
     if (!frameData.empty()) {
         dwt_writetxdata(static_cast<uint16_t>(frameData.size()),
                         const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(frameData.data())), 0);
@@ -310,8 +350,17 @@ core::Result<void> DW3000Controller::startDelayedTx(uint32_t txStartTimeDtu, std
 
 core::Result<void> DW3000Controller::startDelayedRx(uint32_t rxStartTimeDtu, uint16_t timeoutDtu) {
     clearHpdwarn();
-    dwt_setdelayedtrxtime(rxStartTimeDtu);
-    dwt_setrxtimeout(timeoutDtu);
+
+    // DX_TIME (0x2C) + DREF_TIME (0x30, unused/zero) + RX_FWTO (0x34) form one contiguous
+    // 12-byte block — a single SPI write replaces dwt_setdelayedtrxtime +
+    // dwt_setrxtimeout (2 transactions). The DWT_START_RX_DELAYED command below latches
+    // DX_TIME; SYS_CFG.RXWTOE is enabled permanently in configurePhy.
+    std::array<uint8_t, 12> delayRegs{};
+    const uint32_t dxTime = rxStartTimeDtu & 0xFFFFFFFEUL; // DX_TIME bit0 is reserved
+    std::memcpy(&delayRegs[0], &dxTime, 4);
+    // DREF_TIME stays zero
+    std::memcpy(&delayRegs[8], &timeoutDtu, 2); // RX_FWTO (upper 2 bytes stay 0)
+    dwt_writetodevice(DX_TIME_ID, 0U, static_cast<uint16_t>(delayRegs.size()), delayRegs.data());
 
     if (dwt_rxenable(DWT_START_RX_DELAYED | DWT_IDLE_ON_DLY_ERR) != DWT_SUCCESS) {
         return std::unexpected(core::StatusCode::LateTransmission);
@@ -320,7 +369,17 @@ core::Result<void> DW3000Controller::startDelayedRx(uint32_t rxStartTimeDtu, uin
 }
 
 core::Result<void> DW3000Controller::startImmediateRx(uint16_t timeoutDtu) {
-    dwt_setrxtimeout(timeoutDtu);
+    // RXWTOE is permanently enabled (configurePhy), so the RX_FWTO value alone controls
+    // the frame-wait behavior. The driver's own timeout-disabled path *clears RXWTOE*
+    // rather than writing FWTO=0 — the hardware does not treat a zero count as disabled
+    // (it fires immediately), so "wait indefinitely" must be represented by a maximal
+    // window instead: 0xFFFF ≈ 67 s, far beyond any listen interval we use, and every
+    // ranged arm overwrites it with the real window via the merged delay write.
+    const uint32_t fwto = (timeoutDtu > 0) ? timeoutDtu : 0xFFFFU;
+    std::array<uint8_t, 4> fwtoRegs{};
+    std::memcpy(fwtoRegs.data(), &fwto, 4);
+    dwt_writetodevice(RX_FWTO_ID, 0U, 4U, fwtoRegs.data());
+
     if (dwt_rxenable(DWT_START_RX_IMMEDIATE) != DWT_SUCCESS) {
         return std::unexpected(core::StatusCode::TransceiverError);
     }

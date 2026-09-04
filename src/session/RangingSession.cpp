@@ -276,6 +276,12 @@ void RangingSession::onRxTimeout() {
         return;
     }
     if (m_state == SessionState::PrePollListening) {
+        static uint32_t listenTimeoutCount = 0;
+        if (m_logger && (listenTimeoutCount == 0 || (listenTimeoutCount % 8u) == 0u)) {
+            m_logger->log(hal::LogLevel::Debug, "RangingSession",
+                          "[LISTEN TO] PrePoll listener timed out (re-arming)");
+        }
+        listenTimeoutCount++;
         (void)m_transceiver.startImmediateRx(0);
         return;
     }
@@ -311,9 +317,8 @@ void RangingSession::onTxComplete() {
             return;
         }
         const uint32_t finalSlotOffset = 1U + static_cast<uint32_t>(m_params.responderCount);
-        (void)m_transceiver.loadStsKey(m_armed.final_.durskKey);
         (void)m_transceiver.configureStsMode(transceiver::StsMode::NoDataSp3);
-        (void)m_transceiver.loadStsIv(m_armed.final_.stsIv);
+        (void)m_transceiver.loadStsKeyIv(m_armed.final_.durskKey, m_armed.final_.stsIv);
 
         const uint32_t slotTicksHi32 = static_cast<uint32_t>(m_params.slotDurationRstu) * TicksPerRstuHi32;
         const uint32_t pollHi32 = static_cast<uint32_t>(m_pollRxTimestampDtu >> 8);
@@ -340,21 +345,15 @@ void RangingSession::handlePrePollReception(const transceiver::RxSuccessEvent& e
     const uint32_t pollRxTime = prePollRxHi32 + slotTicksHi32 - LeadTimeHi32;
 
     if (m_warmValid) {
-        auto mhr = protocol::FrameCodec::decodeHeader(frame);
-        if (!mhr || mhr->messageId != protocol::MessageIdentifier::PrePoll ||
-            !matchShortAddress(mhr->destinationShortAddress, m_addresses.destinationShort) ||
-            !matchKeySource(mhr->keySource, m_addresses.keySource) ||
-            (m_hasReceivedPrePollCounter && mhr->frameCounter.get() <= m_lastPrePollCounter.get())) {
-            armPrePollListening();
-            return;
-        }
-
+        // Steady state — the arm sequence runs FIRST, before any parsing: decodeHeader is
+        // cheap, but everything that can be deferred must come after the transceiver is
+        // armed (the deadline is slot(2 ms) - lead(160 us) from the PrePoll RMARKER, and
+        // WiFi/Matter cache-pressure spikes can eat hundreds of microseconds).
         m_armed = m_warm;
         m_armedKeysValid = true;
         m_armedPollStsIndex = m_armed.pollStsIndex;
-        (void)m_transceiver.loadStsKey(m_armed.poll.durskKey);
         (void)m_transceiver.configureStsMode(transceiver::StsMode::NoDataSp3);
-        (void)m_transceiver.loadStsIv(m_armed.poll.stsIv);
+        (void)m_transceiver.loadStsKeyIv(m_armed.poll.durskKey, m_armed.poll.stsIv);
 
         m_stashLen = static_cast<uint16_t>(std::min<size_t>(frame.size(), m_stashFrame.size()));
         std::memcpy(m_stashFrame.data(), frame.data(), m_stashLen);
@@ -365,6 +364,17 @@ void RangingSession::handlePrePollReception(const transceiver::RxSuccessEvent& e
         } else {
             (void)m_transceiver.startImmediateRx(ImmediateSearchWindowDtu);
             transitionTo(SessionState::AwaitingPoll);
+        }
+
+        // Post-arm validation (AwaitingPoll hardware shadow, ~1.8 ms): header checks +
+        // PrePoll decrypt. Invalidates the warm keys if the block is not ours.
+        auto mhr = protocol::FrameCodec::decodeHeader(frame);
+        const bool headerOk = mhr && mhr->messageId == protocol::MessageIdentifier::PrePoll &&
+                              matchShortAddress(mhr->destinationShortAddress, m_addresses.destinationShort) &&
+                              matchKeySource(mhr->keySource, m_addresses.keySource) &&
+                              !(m_hasReceivedPrePollCounter && mhr->frameCounter.get() <= m_lastPrePollCounter.get());
+        if (!headerOk) {
+            m_warmValid = false; // not ours / stale: force bootstrap on the next block
         }
         return;
     }
@@ -392,9 +402,8 @@ void RangingSession::handlePrePollReception(const transceiver::RxSuccessEvent& e
     HOT_LOG(hal::LogLevel::Debug, "[ARM] Poll STS idx=%" PRIu32 " (bootstrap)",
             m_armedPollStsIndex.get());
 
-    (void)m_transceiver.loadStsKey(m_armed.poll.durskKey);
     (void)m_transceiver.configureStsMode(transceiver::StsMode::NoDataSp3);
-    (void)m_transceiver.loadStsIv(m_armed.poll.stsIv);
+    (void)m_transceiver.loadStsKeyIv(m_armed.poll.durskKey, m_armed.poll.stsIv);
 
     constexpr uint16_t ImmediateSearchWindowDtu = 4000;
     if (m_transceiver.startDelayedRx(pollRxTime, WindowTimeoutDtu)) {
@@ -540,9 +549,8 @@ void RangingSession::handlePollReception(const transceiver::RxSuccessEvent& even
         armPrePollListening();
         return;
     }
-    (void)m_transceiver.loadStsKey(m_armed.response.durskKey);
-    (void)m_transceiver.loadStsIv(m_armed.response.stsIv);
     (void)m_transceiver.configureStsMode(transceiver::StsMode::NoDataSp3);
+    (void)m_transceiver.loadStsKeyIv(m_armed.response.durskKey, m_armed.response.stsIv);
 
     // SP3 (No-Data STS) response — empty payload, ranging frame
     if (m_transceiver.startDelayedTx(respTxTime, {}, /*rangingFrame=*/true)) {
