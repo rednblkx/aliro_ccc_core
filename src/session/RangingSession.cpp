@@ -862,8 +862,8 @@ void RangingSession::handleFinalDataReception(const transceiver::RxSuccessEvent&
                 RangingResult result{
                     .sessionId = m_params.sessionId,
                     .blockIndex = m_currentBlock,
-                    .roundInBlock = (m_currentRound == scheduledRoundFor(m_currentBlock))
-                                        ? 0u : 1u,
+                    .roundInBlock = static_cast<uint8_t>(
+                        m_currentRound == scheduledRoundFor(m_currentBlock) ? 0 : 1),
                     .distance = *distanceRes,
                     .integrity = integrity,
                     .timestampUs = m_clock.getMonotonicTimeUs(),
