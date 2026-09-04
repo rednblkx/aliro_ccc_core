@@ -13,6 +13,14 @@ struct RangeIntegrityReport {
     uint8_t consecutiveAgreeingCount{0};
     uint8_t stsValidStreak{0};
     bool isTrusted{false};
+    // First-path-power NLOS classification of the Final frame's STS CIR, filled
+    // by the session after ingest (the filter's streak logic is NLOS-agnostic).
+    // valid=false when diagnostics were unreadable/degenerate; nlosDetected is
+    // only meaningful when valid. Power values are Q8.8 dBm.
+    bool nlosValid{false};
+    bool nlosDetected{false};
+    int16_t firstPathPowerDbQ8{0};
+    int16_t rssiDbQ8{0};
 };
 
 struct RangeConsensusConfig {

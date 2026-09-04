@@ -5,6 +5,8 @@
 extern "C" {
 #include "deca_device_api.h"
 #include "deca_interface.h"
+#include "deca_private.h"
+#include "dw3000/dw3000_deca_regs.h"
 
 extern const struct dwt_driver_s dw3000_driver;
 
@@ -184,12 +186,32 @@ core::Result<void> DW3000Controller::configurePhy(const TransceiverConfig& confi
     decaConfig.sfdTO = (config.sfdTimeoutSymbols > 0) ? config.sfdTimeoutSymbols : (64 + 1);
     decaConfig.stsMode = DWT_STS_MODE_OFF;
     decaConfig.stsLength = DWT_STS_LEN_64;
-    decaConfig.pdoaMode = DWT_PDOA_M0;
+    switch (config.pdoa) {
+        case PdoaMode::Mode1:
+            decaConfig.pdoaMode = DWT_PDOA_M1;
+            break;
+        case PdoaMode::Mode3:
+            // DW3220 dual-antenna AoA mode: simultaneous STS accumulation on both RX ports
+            decaConfig.pdoaMode = DWT_PDOA_M3;
+            break;
+        case PdoaMode::Off:
+        default:
+            decaConfig.pdoaMode = DWT_PDOA_M0;
+            break;
+    }
+    m_pdoaEnabled = (config.pdoa != PdoaMode::Off);
 
     if (dwt_configure(&decaConfig) != DWT_SUCCESS) {
         return std::unexpected(core::StatusCode::TransceiverError);
     }
     s_stsKeyValid = false;
+
+#ifdef CONFIG_UWB_NLOS_ENABLE
+    // dwt_configure resets the CIA diagnostic logging config each time, and the
+    // diagnostic registers read 0 unless logging is re-armed to ALL — required
+    // for dwt_nlos_alldiag and the power calculations to see real values.
+    dwt_configciadiag(DW_CIA_DIAG_LOG_ALL);
+#endif
 
     // Permanently enable the frame-wait timeout: RX_FWTO==0 disables it at runtime, and
     // every ranging arm programs a nonzero RX_FWTO. Setting the SYS_CFG.RXWTOE bit once
@@ -228,6 +250,14 @@ void DW3000Controller::handleDriverRxSuccess(uint32_t status, uint16_t dataLengt
         const uint32_t st = (status != 0) ? status : dwt_readsysstatuslo();
         const uint16_t len = (dataLength != 0) ? dataLength : dwt_getframelength(nullptr);
 
+        // PDoA is a single 2-byte SPI read (~10 µs) — safe on the arm critical path
+        int16_t pdoaRaw = 0;
+        bool pdoaValid = false;
+        if (m_pdoaEnabled) {
+            pdoaRaw = dwt_readpdoa();
+            pdoaValid = (qRet >= 0); // garbage unless the STS CIR locked
+        }
+
         RxSuccessEvent ev{
             .rawStatusRegister = st,
             .frameLength = len,
@@ -236,7 +266,9 @@ void DW3000Controller::handleDriverRxSuccess(uint32_t status, uint16_t dataLengt
             // Only CPERR (STS counter/quality failure) disqualifies a frame. RXFCE is set
             // by the driver on every SP3 no-data reception as its "no payload" marker and
             // must not be treated as an error here.
-            .stsPassed = (qRet >= 0 && (st & DWT_INT_CPERR_BIT_MASK) == 0)
+            .stsPassed = (qRet >= 0 && (st & DWT_INT_CPERR_BIT_MASK) == 0),
+            .pdoaRaw = pdoaRaw,
+            .pdoaValid = pdoaValid
         };
         m_listener->onRxSuccess(ev);
     }
@@ -293,6 +325,7 @@ core::Result<void> DW3000Controller::loadStsKeyIv(std::span<const std::byte, 16>
     const bool keyChanged = !(s_stsKeyValid && std::equal(key.begin(), key.end(), s_lastStsKey.begin()));
 
     std::array<uint8_t, 32> blob{};
+    // Whole-16-byte reverse per word-group, matching packStsRegister's byte order
     for (size_t i = 0; i < 16; ++i) {
         blob[i] = static_cast<uint8_t>(key[15 - i]);
         blob[16 + i] = static_cast<uint8_t>(iv[15 - i]);
@@ -398,6 +431,44 @@ uint64_t DW3000Controller::readRxTimestampDtu() {
           (static_cast<uint64_t>(ts[2]) << 16) |
           (static_cast<uint64_t>(ts[3]) << 24) |
           (static_cast<uint64_t>(ts[4]) << 32);
+}
+
+DW3000Controller::FirstPathDiagnostics DW3000Controller::readFinalFirstPathDiagnostics() {
+#ifdef CONFIG_UWB_NLOS_ENABLE
+    // The distance comes from the Final frame's STS timestamp, so the relevant
+    // CIR is the STS0 accumulator. dwt_nlos_alldiag is five small register
+    // reads — far cheaper than dwt_readdiagnostics_acc's 216-byte burst, and
+    // it returns exactly the fields the two power calculations need. It reads
+    // raw diagnostics only; we ignore its own "result" heuristic and classify
+    // ourselves from the power ratio.
+    dwt_nlos_alldiag_t diag{};
+    diag.diag_type = STS1;
+    if (dwt_nlos_alldiag(&diag) != DWT_SUCCESS || diag.accumCount == 0) {
+        return {};
+    }
+
+    const dwt_acc_idx_e acc = DWT_ACC_IDX_STS0_M;
+    const dwt_cirdiags_t cirDiag{
+        .power = diag.cir_power,
+        .F1 = diag.F1,
+        .F2 = diag.F2,
+        .F3 = diag.F3,
+        .peakAmp = 0,
+        .peakIndex = 0,
+        .FpIndex = 0,
+        .accumCount = static_cast<uint16_t>(diag.accumCount)
+    };
+
+    int16_t fpPower = 0;
+    int16_t rssi = 0;
+    if (dwt_calculate_first_path_power(&cirDiag, acc, &fpPower) != DWT_SUCCESS ||
+        dwt_calculate_rssi(&cirDiag, acc, &rssi) != DWT_SUCCESS) {
+        return {};
+    }
+    return FirstPathDiagnostics{.firstPathPowerDbQ8 = fpPower, .rssiDbQ8 = rssi, .valid = true};
+#else
+    return {};
+#endif
 }
 
 uint64_t DW3000Controller::readTxTimestampDtu() {

@@ -180,7 +180,12 @@ core::Result<void> RangingSession::start(
         .sfd = core::SfdType::Ieee4a,
         .sfdTimeoutSymbols = 65,
         .rxPacSize = 8,
-        .antennaDelay = 0
+        .antennaDelay = 0,
+        // DW3220 dual-antenna AoA: PDoA mode 3 accumulates the STS segments on both RX
+        // ports so dwt_readpdoa() yields the phase difference; single-antenna parts
+        // (and every default path) stay in M0 exactly as before.
+        .pdoa = m_nodeConfig.enableAoA ? transceiver::PdoaMode::Mode3
+                                       : transceiver::PdoaMode::Off
     };
 
     auto cfgRes = m_transceiver.configurePhy(hwCfg);
@@ -578,6 +583,8 @@ void RangingSession::handleFinalReception(const transceiver::RxSuccessEvent& eve
     m_finalRxTimestampDtu = event.rxTimestampDtu;
     m_finalStsQuality = event.stsQualityIndex;
     m_finalStsPassed = event.stsPassed;
+    m_finalPdoaRaw = event.pdoaRaw;
+    m_finalPdoaValid = event.pdoaValid;
 
     HOT_LOG(hal::LogLevel::Info, "[FINAL RX] stsPassed=%d, qual=%d",
             event.stsPassed ? 1 : 0, static_cast<int>(event.stsQualityIndex));
@@ -594,6 +601,15 @@ void RangingSession::handleFinalReception(const transceiver::RxSuccessEvent& eve
         (void)m_transceiver.startImmediateRx(WindowTimeoutDtu * 2);
     }
     transitionTo(SessionState::AwaitingFinalData);
+
+    // NLOS diagnostics: the FinalData arm above has been issued, so these SPI
+    // reads are off the arm critical path. Sampling the STS CIR now still
+    // reflects this Final reception (the accumulator holds until the next arm).
+    const auto fpDiag = m_transceiver.readFinalFirstPathDiagnostics();
+    m_finalFirstPathDbQ8 = fpDiag.firstPathPowerDbQ8;
+    m_finalRssiDbQ8 = fpDiag.rssiDbQ8;
+    m_finalNlosDiagValid = fpDiag.valid;
+
     processStashedPrePoll();
 }
 
@@ -683,23 +699,51 @@ void RangingSession::handleFinalDataReception(const transceiver::RxSuccessEvent&
         if (distanceRes) {
             auto integrity = m_filter.ingest(*distanceRes, m_finalStsPassed ? 0 : -1, m_finalStsQuality);
 
+            constexpr int16_t kNlosMarginDbQ8 =
+#ifdef CONFIG_UWB_NLOS_FP_MARGIN_DB
+                static_cast<int16_t>(CONFIG_UWB_NLOS_FP_MARGIN_DB * 256);
+#else
+                static_cast<int16_t>(10 * 256);
+#endif
+            const ranging::NlosVerdict nlos = ranging::NlosDetector{
+                ranging::NlosConfig{kNlosMarginDbQ8}}.evaluate(
+                ranging::NlosSample{.firstPathPowerDbQ8 = m_finalFirstPathDbQ8,
+                                    .rssiDbQ8 = m_finalRssiDbQ8});
+            integrity.nlosValid = nlos.valid && m_finalNlosDiagValid;
+            integrity.nlosDetected = nlos.nlos;
+            integrity.firstPathPowerDbQ8 = m_finalFirstPathDbQ8;
+            integrity.rssiDbQ8 = m_finalRssiDbQ8;
+
             if (m_logger) {
-                char buf[128];
-                std::snprintf(buf, sizeof(buf), ">>> [RANGE RESULT] blk=%" PRIu16 ", dist=%" PRId32 " cm, stsQuality=%d, trusted=%d",
+                char buf[160];
+                std::snprintf(buf, sizeof(buf), ">>> [RANGE RESULT] blk=%" PRIu16 ", dist=%" PRId32 " cm, stsQuality=%d, trusted=%d, nlos=%d (fp=%d rssi=%d)",
                               m_currentBlock.get(),
                               distanceRes->get() / 10,
                               static_cast<int>(m_finalStsQuality),
-                              integrity.isTrusted ? 1 : 0);
+                              integrity.isTrusted ? 1 : 0,
+                              integrity.nlosDetected ? 1 : 0,
+                              m_finalFirstPathDbQ8 / 256,
+                              m_finalRssiDbQ8 / 256);
                 m_logger->log(hal::LogLevel::Debug, "RangingSession", buf);
             }
 
             if (m_callback) {
+                // AoA comes from the Final frame's STS PDoA (captured in handleFinalReception);
+                // the estimator returns valid=false when AoA is disabled or spacing is unset.
+                const auto aoa = m_nodeConfig.enableAoA
+                                     ? ranging::AoAEstimator::fromPdoa(
+                                           m_finalPdoaRaw, m_params.channel,
+                                           m_nodeConfig.aoaAntennaSpacingMm)
+                                     : ranging::AoAEstimate{};
+
                 RangingResult result{
                     .sessionId = m_params.sessionId,
                     .blockIndex = m_currentBlock,
                     .distance = *distanceRes,
                     .integrity = integrity,
-                    .timestampUs = m_clock.getMonotonicTimeUs()
+                    .timestampUs = m_clock.getMonotonicTimeUs(),
+                    .aoaCentiDegrees = aoa.centiDegrees,
+                    .aoaValid = aoa.valid
                 };
                 m_callback(result);
             }

@@ -12,6 +12,14 @@
 
 namespace uwb::transceiver {
 
+// Phase Difference of Arrival mode. Off for single-antenna parts; Mode3 (dual-RX
+// simultaneous STS accumulation) is the DW3220 dual-antenna AoA mode.
+enum class PdoaMode : uint8_t {
+    Off,
+    Mode1,
+    Mode3
+};
+
 struct TransceiverConfig {
     core::UwbChannel channel{core::UwbChannel::Channel9};
     uint16_t preambleLengthSymbols{64};
@@ -20,6 +28,7 @@ struct TransceiverConfig {
     uint16_t sfdTimeoutSymbols{65};
     uint16_t rxPacSize{8};
     uint16_t antennaDelay{0};
+    PdoaMode pdoa{PdoaMode::Off};
 };
 
 enum class StsMode : uint8_t {
@@ -34,6 +43,10 @@ struct RxSuccessEvent {
     uint64_t rxTimestampDtu{0};
     int16_t stsQualityIndex{0};
     bool stsPassed{false};
+    // Raw PDoA measurement (signed Q11 fixed point, radians). Only valid when the
+    // transceiver was configured with a PdoaMode other than Off.
+    int16_t pdoaRaw{0};
+    bool pdoaValid{false};
 };
 
 class ITransceiverListener {
@@ -75,6 +88,20 @@ public:
 
     // Timestamp & Data Ingestion
     [[nodiscard]] uint64_t readRxTimestampDtu();
+
+    // First-path-power NLOS input: reads the STS0 accumulator diagnostics
+    // (F1/F2/F3, CIR power, accumulation count) via per-register reads and
+    // converts them to Q8.8 dBm first-path power and total channel power (RSSI).
+    // Call after an RX event, off the arm critical path; valid=false when the
+    // diagnostics are unreadable or degenerate. Returns SHRT_MIN (Q8.8 -128 dB)
+    // in both power fields when !valid.
+    struct FirstPathDiagnostics {
+        int16_t firstPathPowerDbQ8{INT16_MIN};
+        int16_t rssiDbQ8{INT16_MIN};
+        bool valid{false};
+    };
+    [[nodiscard]] FirstPathDiagnostics readFinalFirstPathDiagnostics();
+
     [[nodiscard]] uint64_t readTxTimestampDtu();
     [[nodiscard]] uint32_t readSystemTimestampDtu();
     [[nodiscard]] uint32_t readSysStatusLo() const;
@@ -97,6 +124,7 @@ private:
     hal::IClock& m_clock;
     ITransceiverListener* m_listener{nullptr};
     bool m_initialized{false};
+    bool m_pdoaEnabled{false};
 
     void performHardwareReset();
 };

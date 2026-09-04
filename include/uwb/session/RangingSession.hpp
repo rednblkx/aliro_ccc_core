@@ -13,7 +13,9 @@
 #include "uwb/hal/ILogger.hpp"
 #include "uwb/protocol/FrameCodec.hpp"
 #include "uwb/protocol/SetupMessageCodec.hpp"
+#include "uwb/ranging/AoAEstimator.hpp"
 #include "uwb/ranging/DistanceEstimator.hpp"
+#include "uwb/ranging/NlosDetector.hpp"
 #include "uwb/ranging/RangeConsensusFilter.hpp"
 #include "uwb/transceiver/DW3000Controller.hpp"
 
@@ -50,12 +52,23 @@ struct RangingResult {
     core::DistanceMm distance{0};
     ranging::RangeIntegrityReport integrity{};
     uint64_t timestampUs{0};
+    // Angle of Arrival (optional, dual-antenna parts only): 1/100 deg, from the
+    // DW3220's hardware PDoA on the Final frame's STS segments. Unambiguous range is
+    // channel/spacing dependent (±54.6 deg on ch9 with 23 mm spacing); beyond it the
+    // estimate has folded. Sign convention follows the DW3220 PDoA register.
+    int32_t aoaCentiDegrees{0};
+    bool aoaValid{false};
 };
 
 struct SessionNodeConfig {
     uint8_t responderIndex{0}; // 0 = Primary anchor (Lock), 1 = Secondary (Satellite)
     int8_t blockParityFilter{-1}; // -1 = Respond every block, 0 = Even blocks, 1 = Odd blocks
     core::DistanceMm antennaDelayBias{0};
+    // AoA (optional): requires a DW3220-class dual-RX part with both antennas connected.
+    // aoaAntennaSpacingMm is the antenna center-to-center spacing in mm (float, e.g. 23.1);
+    // <= 0 disables the angle math even when PDoA mode is active.
+    bool enableAoA{false};
+    float aoaAntennaSpacingMm{0.0f};
 };
 
 using RangeCallback = std::function<void(const RangingResult&)>;
@@ -120,6 +133,13 @@ private:
     uint64_t m_finalRxTimestampDtu{0};
     int16_t m_finalStsQuality{0};
     bool m_finalStsPassed{false};
+    int16_t m_finalPdoaRaw{0};
+    bool m_finalPdoaValid{false};
+    // First-path-power NLOS inputs sampled off the Final frame's STS diagnostics
+    // (read after the FinalData arm — outside the arm deadline). Q8.8 dBm.
+    int16_t m_finalFirstPathDbQ8{0};
+    int16_t m_finalRssiDbQ8{0};
+    bool m_finalNlosDiagValid{false};
 
     // Pre-warmed slot keys: all SP3 legs of a block (Poll/Response/Final) are derivable
     // during the block idle — dURSK is round-constant and the Poll STS index advances by a

@@ -61,6 +61,7 @@ endif()
 # Core UWB Library
 # -----------------------------------------------------------------------------
 add_library(uwb_core
+        src/ranging/AoAEstimator.cpp
         src/ranging/DistanceEstimator.cpp
         src/ranging/HoppingCalculator.cpp
         src/ranging/RangeConsensusFilter.cpp
