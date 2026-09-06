@@ -69,6 +69,11 @@ From then on the library is purely event-driven: call the `ITransceiverListener`
 - Keep key derivation and decryption off the radio-arm critical path; the session pre-derives per-slot keys for this reason.
 - The build treats warnings as errors-in-spirit (`-Wall -Wextra -Wconversion -Wsign-conversion …`): new code must be warning-clean.
 
+## Credits
+
+[@ultrawidelock](https://github.com/ultrawidelock/ultrawidelock)
+[@br101](https://github.com/br101/dw3000-decadriver-source)
+
 ## License & Legal
 
 This project is licensed under MIT — see [LICENSE](LICENSE), excluding the linked DW3000 driver, for which it supplies it's own licenses, see repo [here](https://github.com/br101/dw3000-decadriver-source)
