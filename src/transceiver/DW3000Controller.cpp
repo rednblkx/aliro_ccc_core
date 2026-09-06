@@ -228,7 +228,7 @@ core::Result<void> DW3000Controller::configurePhy(const TransceiverConfig& confi
     dwt_txconfig_t txConfig;
     std::memset(&txConfig, 0, sizeof(txConfig));
     txConfig.PGdly = 0x34;
-    txConfig.power = 0xfdfdfdfdUL;
+    txConfig.power = 0xa0a0a0a0UL;
     txConfig.PGcount = 0;
     dwt_configuretxrf(&txConfig);
 
@@ -435,34 +435,28 @@ uint64_t DW3000Controller::readRxTimestampDtu() {
 
 DW3000Controller::FirstPathDiagnostics DW3000Controller::readFinalFirstPathDiagnostics() {
 #ifdef CONFIG_UWB_NLOS_ENABLE
-    // The distance comes from the Final frame's STS timestamp, so the relevant
-    // CIR is the STS0 accumulator. dwt_nlos_alldiag is five small register
-    // reads — far cheaper than dwt_readdiagnostics_acc's 216-byte burst, and
-    // it returns exactly the fields the two power calculations need. It reads
-    // raw diagnostics only; we ignore its own "result" heuristic and classify
-    // ourselves from the power ratio.
-    dwt_nlos_alldiag_t diag{};
-    diag.diag_type = STS1;
-    if (dwt_nlos_alldiag(&diag) != DWT_SUCCESS || diag.accumCount == 0) {
+    dwt_nlos_alldiag_t ipDiag{};
+    ipDiag.diag_type = IPATOV;
+    if (dwt_nlos_alldiag(&ipDiag) != DWT_SUCCESS || ipDiag.accumCount == 0) {
         return {};
     }
 
-    const dwt_acc_idx_e acc = DWT_ACC_IDX_STS0_M;
-    const dwt_cirdiags_t cirDiag{
-        .power = diag.cir_power,
-        .F1 = diag.F1,
-        .F2 = diag.F2,
-        .F3 = diag.F3,
+    const dwt_cirdiags_t ipCirDiag{
+        .power = ipDiag.cir_power,
+        .F1 = ipDiag.F1,
+        .F2 = ipDiag.F2,
+        .F3 = ipDiag.F3,
         .peakAmp = 0,
         .peakIndex = 0,
         .FpIndex = 0,
-        .accumCount = static_cast<uint16_t>(diag.accumCount)
+        .accumCount = static_cast<uint16_t>(ipDiag.accumCount)
     };
 
     int16_t fpPower = 0;
     int16_t rssi = 0;
-    if (dwt_calculate_first_path_power(&cirDiag, acc, &fpPower) != DWT_SUCCESS ||
-        dwt_calculate_rssi(&cirDiag, acc, &rssi) != DWT_SUCCESS) {
+    if (dwt_calculate_first_path_power(&ipCirDiag, DWT_ACC_IDX_IP_M, &fpPower) != DWT_SUCCESS ||
+        dwt_calculate_rssi(&ipCirDiag, DWT_ACC_IDX_IP_M, &rssi) != DWT_SUCCESS ||
+        rssi == INT16_MIN || fpPower == INT16_MIN) {
         return {};
     }
     return FirstPathDiagnostics{.firstPathPowerDbQ8 = fpPower, .rssiDbQ8 = rssi, .valid = true};

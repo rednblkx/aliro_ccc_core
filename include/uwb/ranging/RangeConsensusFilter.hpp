@@ -21,14 +21,15 @@ struct RangeIntegrityReport {
     bool nlosDetected{false};
     int16_t firstPathPowerDbQ8{0};
     int16_t rssiDbQ8{0};
+    bool aoaUnstable{false};
 };
 
 struct RangeConsensusConfig {
     core::DistanceMm minPlausibleDistance{-300};     // -30 cm (near-field tolerance)
-    core::DistanceMm maxPlausibleDistance{30000};    // 30 meters
+    core::DistanceMm maxPlausibleDistance{20000};    // 20 meters
     core::DistanceMm maxConsecutiveSpreadMm{500};    // 50 cm max delta
     uint8_t requiredConsensusCount{3};               // K = 3
-    int16_t minimumStsQualityThreshold{0};
+    int16_t minimumStsQualityThreshold{55};
 };
 
 class RangeConsensusFilter {

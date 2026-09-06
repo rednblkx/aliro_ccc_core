@@ -148,6 +148,7 @@ private:
     int16_t m_finalFirstPathDbQ8{0};
     int16_t m_finalRssiDbQ8{0};
     bool m_finalNlosDiagValid{false};
+    ranging::AoaStabilityDetector m_aoaStability{};
 
     // Pre-warmed slot keys: all SP3 legs of a block (Poll/Response/Final) are derivable
     // during the block idle — dURSK is round-constant and the Poll STS index follows the

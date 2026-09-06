@@ -54,6 +54,17 @@ bool matchShortAddress(uint16_t a, uint16_t b) noexcept {
     return (a == b) || (a == swapped);
 }
 
+ranging::AoaStabilityConfig aoaStabilityConfig() {
+    ranging::AoaStabilityConfig cfg{};
+#ifdef CONFIG_UWB_NLOS_AOA_JUMP_CENTI_DEG
+    cfg.jumpThresholdCentiDeg = CONFIG_UWB_NLOS_AOA_JUMP_CENTI_DEG;
+#endif
+#ifdef CONFIG_UWB_NLOS_AOA_HOLD_BLOCKS
+    cfg.holdBlocks = static_cast<uint8_t>(CONFIG_UWB_NLOS_AOA_HOLD_BLOCKS);
+#endif
+    return cfg;
+}
+
 } // namespace
 
 RangingSession::RangingSession(
@@ -171,6 +182,7 @@ core::Result<void> RangingSession::start(
     }
 
     m_filter.reset();
+    m_aoaStability = ranging::AoaStabilityDetector{aoaStabilityConfig()};
     m_hasReceivedPrePollCounter = false;
     m_hasReceivedFinalDataCounter = false;
     m_hasPrePollStsIndex = false;
@@ -189,7 +201,7 @@ core::Result<void> RangingSession::start(
         .sfd = core::SfdType::Ieee4a,
         .sfdTimeoutSymbols = 65,
         .rxPacSize = 8,
-        .antennaDelay = 0,
+        .antennaDelay = 16346,
         // DW3220 dual-antenna AoA: PDoA mode 3 accumulates the STS segments on both RX
         // ports so dwt_readpdoa() yields the phase difference; single-antenna parts
         // (and every default path) stay in M0 exactly as before.
@@ -258,6 +270,7 @@ core::Result<void> RangingSession::resumeWithAnchor(core::StsIndex newStsIndex0,
     m_warmValid = false;
     m_armedKeysValid = false;
     m_filter.reset();
+    m_aoaStability.reset();
 
     armPrePollListening();
     return {};
@@ -837,28 +850,34 @@ void RangingSession::handleFinalDataReception(const transceiver::RxSuccessEvent&
             integrity.firstPathPowerDbQ8 = m_finalFirstPathDbQ8;
             integrity.rssiDbQ8 = m_finalRssiDbQ8;
 
+            const auto aoa = m_nodeConfig.enableAoA
+                                 ? ranging::AoAEstimator::fromPdoa(
+                                       m_finalPdoaRaw, m_params.channel,
+                                       m_nodeConfig.aoaAntennaSpacingMm)
+                                 : ranging::AoAEstimate{};
+
+            ranging::AoaStabilityVerdict aoaVerdict{};
+            if (aoa.valid) {
+                aoaVerdict = m_aoaStability.ingest(aoa.centiDegrees);
+                integrity.aoaUnstable = aoaVerdict.jump;
+                integrity.nlosDetected = integrity.nlosDetected || aoaVerdict.gated;
+            }
+
             if (m_logger) {
                 char buf[160];
-                std::snprintf(buf, sizeof(buf), ">>> [RANGE RESULT] blk=%" PRIu16 ", dist=%" PRId32 " cm, stsQuality=%d, trusted=%d, nlos=%d (fp=%d rssi=%d)",
+                std::snprintf(buf, sizeof(buf), ">>> [RANGE RESULT] blk=%" PRIu16 ", dist=%" PRId32 " cm, stsQuality=%d, trusted=%d, nlos=%d aoaJump=%d (fp=%d rssi=%d)",
                               m_currentBlock.get(),
                               distanceRes->get() / 10,
                               static_cast<int>(m_finalStsQuality),
                               integrity.isTrusted ? 1 : 0,
                               integrity.nlosDetected ? 1 : 0,
+                              aoaVerdict.jump ? 1 : 0,
                               m_finalFirstPathDbQ8 / 256,
                               m_finalRssiDbQ8 / 256);
                 m_logger->log(hal::LogLevel::Debug, "RangingSession", buf);
             }
 
             if (m_callback) {
-                // AoA comes from the Final frame's STS PDoA (captured in handleFinalReception);
-                // the estimator returns valid=false when AoA is disabled or spacing is unset.
-                const auto aoa = m_nodeConfig.enableAoA
-                                     ? ranging::AoAEstimator::fromPdoa(
-                                           m_finalPdoaRaw, m_params.channel,
-                                           m_nodeConfig.aoaAntennaSpacingMm)
-                                     : ranging::AoAEstimate{};
-
                 RangingResult result{
                     .sessionId = m_params.sessionId,
                     .blockIndex = m_currentBlock,
